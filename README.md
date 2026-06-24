@@ -310,6 +310,124 @@ fprintd-enroll && fprintd-verify
 
 ---
 
+## Desktop integration on Astra Linux (Fly)
+
+This section is Astra Fly-specific. By the steps above, fingerprint already works on
+the **text console (`login`), `su` and `sudo`**. The graphical components need extra work.
+
+### The Fly lock screen problem
+
+The stock Fly locker (`fly-dm_locker_modern`) has **no fingerprint UI** and its helper
+`fly-wmpam` only starts the PAM auth cycle *after the password form is submitted*. So on
+the locked screen the reader is idle until you **press Enter** (empty/wrong password is
+fine) — only then does `pam_fprintd` arm and you can scan. Dead ends we hit (don't bother):
+
+- Replacing the `fly-dm_locker_modern` binary with a wrapper → `fly-wm` waits for an
+  unlock *IPC*, not process exit, and re-locks in a loop.
+- `NoPassEnable` in `/etc/X11/fly-dm/fly-dmrc` is "passwordless login", not biometrics.
+- `kglobalaccel` does not bind `Meta+L` (checked) — the Fly WM owns it.
+
+### Lock screen with fingerprint via xsecurelock + Matrix rain
+
+We bind `Win+L` to [xsecurelock](https://github.com/google/xsecurelock) instead, with a
+`cmatrix` saver and a background fingerprint watcher (touch the sensor → unlock; no Enter).
+
+1. Build xsecurelock and install screensaver tools:
+   ```bash
+   sudo apt-get install -y autoconf automake pkg-config cmatrix xterm x11-utils \
+     libpam0g-dev libx11-dev libxmu-dev libxcomposite-dev libxext-dev libxfixes-dev \
+     libxrandr-dev libxss-dev libxft-dev
+   git clone --depth 1 https://github.com/google/xsecurelock.git
+   cd xsecurelock && sh autogen.sh && ./configure --with-pam-service-name=xsecurelock
+   make && sudo make install      # -> /usr/local/bin/xsecurelock
+   ```
+
+2. PAM service for xsecurelock — **password only** (fingerprint is handled by the watcher,
+   so it must NOT be in this stack, or the two fight over the device):
+   ```bash
+   sudo tee /etc/pam.d/xsecurelock >/dev/null <<'EOF'
+   #%PAM-1.0
+   auth     required  pam_unix.so try_first_pass nullok
+   account  include   common-account
+   EOF
+   ```
+
+3. `cmatrix` saver (draws into the xsecurelock saver window via an embedded xterm):
+   ```bash
+   sudo tee /usr/local/libexec/xsecurelock/saver_cmatrix >/dev/null <<'EOF'
+   #!/bin/sh
+   WID="$XSCREENSAVER_WINDOW"
+   [ -z "$WID" ] && exec /usr/local/libexec/xsecurelock/saver_blank
+   W=1920; H=1080
+   command -v xwininfo >/dev/null 2>&1 && \
+     eval "$(xwininfo -id "$WID" 2>/dev/null | awk '/Width:/{print "W="$2} /Height:/{print "H="$2}')"
+   COLS=$(( W / 8 )); ROWS=$(( H / 16 ))
+   [ "$COLS" -lt 20 ] && COLS=80; [ "$ROWS" -lt 10 ] && ROWS=24
+   exec xterm -into "$WID" -geometry "${COLS}x${ROWS}+0+0" \
+     -fa "Monospace" -fs 14 -bg black -fg green -b 0 +sb -bc -e cmatrix -b -u 3
+   EOF
+   sudo chmod 755 /usr/local/libexec/xsecurelock/saver_cmatrix
+   ```
+
+4. Wrapper that runs xsecurelock + a background `fprintd-verify` watcher; on a match it
+   cleanly unlocks (`SIGTERM` makes xsecurelock kill its children and exit):
+   ```bash
+   sudo tee /usr/local/bin/xsecurelock-fp >/dev/null <<'EOF'
+   #!/bin/sh
+   export XSECURELOCK_SAVER=/usr/local/libexec/xsecurelock/saver_cmatrix
+   export XSECURELOCK_PASSWORD_PROMPT=cursor
+   export XSECURELOCK_SHOW_DATETIME=1
+   export XSECURELOCK_SHOW_HOSTNAME=0
+   export XSECURELOCK_SAVER_RESET_ON_AUTH_CLOSE=1
+   /usr/local/bin/xsecurelock &
+   xpid=$!
+   ( while kill -0 "$xpid" 2>/dev/null; do
+       if fprintd-verify 2>/dev/null | grep -q 'verify-match'; then
+           kill -TERM "$xpid" 2>/dev/null; break
+       fi
+       sleep 0.2
+     done ) &
+   watcher=$!
+   wait "$xpid"
+   kill "$watcher" 2>/dev/null
+   pkill -INT -u "$(id -u)" -x fprintd-verify 2>/dev/null
+   exit 0
+   EOF
+   sudo chmod 755 /usr/local/bin/xsecurelock-fp
+   ```
+
+5. Bind `Win+L` to it. In `~/.fly/keyshortcutrc` set `Mod4|l = "/usr/local/bin/xsecurelock-fp"`.
+   **Fly WM honours the *first* definition**, and the system file is included before yours,
+   so also comment the stock binding:
+   ```bash
+   sudo sed -i 's/^Mod4|l = FLYWM_LOCK/;Mod4|l = FLYWM_LOCK  # -> xsecurelock-fp/' \
+     /usr/share/fly-wm/keyshortcutrc
+   # Apply (a plain "force update" does NOT re-read the file — a full restart does):
+   DISPLAY=:0 XAUTHORITY="$HOME/.Xauthority" fly-wmfunc FLYWM_RESTART
+   ```
+
+Result: `Win+L` shows the Matrix rain; touch the sensor to unlock instantly, or press a
+key to type the password. No countdown, no failed-attempt penalty (the fingerprint is
+outside the locker's PAM stack).
+
+> Note: the menu "Lock" item, idle auto-lock and lock-on-suspend still go through
+> `FLYWM_LOCK` → the stock locker (Enter-then-scan). After a `fly-wm` package upgrade the
+> commented system binding is restored — re-apply step 5.
+
+### Avoid the 30 s fingerprint wait at graphical login
+
+Because `pam_fprintd` is **first** in `common-auth`, the graphical greeter (`fly-dm`) waits
+out its timeout before accepting a typed password. Remove fingerprint from the greeter only
+(keep it for console/`sudo`/`su`) by replacing `@include common-auth` in `/etc/pam.d/fly-dm`
+with an inline copy of `common-auth` **without** the `pam_fprintd` line. The jump offsets
+stay correct: the removed line was the target of `default=2`/`success=1`, which then land on
+`pam_unix`, whose `success=2` still lands on `pam_permit`. Back up first
+(`sudo cp -a /etc/pam.d/fly-dm /etc/pam.d/fly-dm.orig`) and verify the greeter prompts for a
+password with no "place finger". Do **not** edit `common-auth` itself — that would disable
+fingerprint everywhere.
+
+---
+
 ## Credits
 
 - Proprietary FocalTech TOD driver packaging: [`ryenyuku/libfprint-ft9201`](https://github.com/ryenyuku/libfprint-ft9201)

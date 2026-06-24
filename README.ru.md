@@ -299,3 +299,122 @@ sudo pam-auth-update --enable fprintd
 sudo systemctl restart fprintd
 fprintd-enroll && fprintd-verify
 ```
+
+---
+
+## Десктоп-интеграция (Astra Linux, Fly)
+
+Раздел специфичен для Astra Fly. После шагов выше отпечаток уже работает на **текстовой
+консоли (`login`), `su` и `sudo`**. С графическими компонентами нужно повозиться.
+
+### Проблема штатного локера Fly
+
+У штатного локера (`fly-dm_locker_modern`) **нет UI для отпечатка**, а его помощник
+`fly-wmpam` запускает PAM-авторизацию только *после отправки формы пароля*. Поэтому на
+залоченном экране сканер «спит», пока не **нажмёшь Enter** (пустой/неверный пароль не
+важен) — только тогда взводится `pam_fprintd`. Тупики (не тратьте время):
+
+- Подмена бинаря `fly-dm_locker_modern` обёрткой → `fly-wm` ждёт *IPC* об анлоке, а не
+  выхода процесса, и зацикливает блокировку.
+- `NoPassEnable` в `/etc/X11/fly-dm/fly-dmrc` — это «вход без пароля», не биометрия.
+- `kglobalaccel` не держит `Meta+L` (проверено) — клавишей владеет Fly WM.
+
+### Экран блокировки с отпечатком: xsecurelock + «дождь» cmatrix
+
+Привязываем `Win+L` к [xsecurelock](https://github.com/google/xsecurelock) с сейвером
+`cmatrix` и фоновым сторожем отпечатка (касание сканера → разблокировка, без Enter).
+
+1. Сборка xsecurelock и инструменты сейвера:
+   ```bash
+   sudo apt-get install -y autoconf automake pkg-config cmatrix xterm x11-utils \
+     libpam0g-dev libx11-dev libxmu-dev libxcomposite-dev libxext-dev libxfixes-dev \
+     libxrandr-dev libxss-dev libxft-dev
+   git clone --depth 1 https://github.com/google/xsecurelock.git
+   cd xsecurelock && sh autogen.sh && ./configure --with-pam-service-name=xsecurelock
+   make && sudo make install      # -> /usr/local/bin/xsecurelock
+   ```
+
+2. PAM-сервис xsecurelock — **только пароль** (отпечаток обрабатывает сторож, в этом стеке
+   его быть НЕ должно, иначе конфликт за сканер):
+   ```bash
+   sudo tee /etc/pam.d/xsecurelock >/dev/null <<'EOF'
+   #%PAM-1.0
+   auth     required  pam_unix.so try_first_pass nullok
+   account  include   common-account
+   EOF
+   ```
+
+3. Сейвер `cmatrix` (рисует в окне сейвера xsecurelock через встроенный xterm):
+   ```bash
+   sudo tee /usr/local/libexec/xsecurelock/saver_cmatrix >/dev/null <<'EOF'
+   #!/bin/sh
+   WID="$XSCREENSAVER_WINDOW"
+   [ -z "$WID" ] && exec /usr/local/libexec/xsecurelock/saver_blank
+   W=1920; H=1080
+   command -v xwininfo >/dev/null 2>&1 && \
+     eval "$(xwininfo -id "$WID" 2>/dev/null | awk '/Width:/{print "W="$2} /Height:/{print "H="$2}')"
+   COLS=$(( W / 8 )); ROWS=$(( H / 16 ))
+   [ "$COLS" -lt 20 ] && COLS=80; [ "$ROWS" -lt 10 ] && ROWS=24
+   exec xterm -into "$WID" -geometry "${COLS}x${ROWS}+0+0" \
+     -fa "Monospace" -fs 14 -bg black -fg green -b 0 +sb -bc -e cmatrix -b -u 3
+   EOF
+   sudo chmod 755 /usr/local/libexec/xsecurelock/saver_cmatrix
+   ```
+
+4. Обёртка: запускает xsecurelock + фоновый сторож `fprintd-verify`; при совпадении чисто
+   снимает блокировку (`SIGTERM` заставляет xsecurelock убить детей и выйти):
+   ```bash
+   sudo tee /usr/local/bin/xsecurelock-fp >/dev/null <<'EOF'
+   #!/bin/sh
+   export XSECURELOCK_SAVER=/usr/local/libexec/xsecurelock/saver_cmatrix
+   export XSECURELOCK_PASSWORD_PROMPT=cursor
+   export XSECURELOCK_SHOW_DATETIME=1
+   export XSECURELOCK_SHOW_HOSTNAME=0
+   export XSECURELOCK_SAVER_RESET_ON_AUTH_CLOSE=1
+   /usr/local/bin/xsecurelock &
+   xpid=$!
+   ( while kill -0 "$xpid" 2>/dev/null; do
+       if fprintd-verify 2>/dev/null | grep -q 'verify-match'; then
+           kill -TERM "$xpid" 2>/dev/null; break
+       fi
+       sleep 0.2
+     done ) &
+   watcher=$!
+   wait "$xpid"
+   kill "$watcher" 2>/dev/null
+   pkill -INT -u "$(id -u)" -x fprintd-verify 2>/dev/null
+   exit 0
+   EOF
+   sudo chmod 755 /usr/local/bin/xsecurelock-fp
+   ```
+
+5. Привязка `Win+L`. В `~/.fly/keyshortcutrc` поставить `Mod4|l = "/usr/local/bin/xsecurelock-fp"`.
+   **Fly WM берёт ПЕРВОЕ определение**, а системный файл подключается раньше пользовательского,
+   поэтому штатную привязку надо закомментировать:
+   ```bash
+   sudo sed -i 's/^Mod4|l = FLYWM_LOCK/;Mod4|l = FLYWM_LOCK  # -> xsecurelock-fp/' \
+     /usr/share/fly-wm/keyshortcutrc
+   # Применить (обычный "force update" файл НЕ перечитывает — нужен полный рестарт):
+   DISPLAY=:0 XAUTHORITY="$HOME/.Xauthority" fly-wmfunc FLYWM_RESTART
+   ```
+
+Итог: по `Win+L` идёт матричный дождь; касание сканера разблокирует мгновенно, либо
+нажать клавишу и ввести пароль. Без обратного отсчёта и без штрафных «failed» попыток
+(отпечаток вынесен за пределы PAM-стека локера).
+
+> Примечание: пункт меню «Заблокировать», автоблокировка по простою и блокировка при
+> засыпании по-прежнему идут через `FLYWM_LOCK` → штатный локер (Enter, затем скан). После
+> обновления пакета `fly-wm` закомментированная системная привязка восстановится — повторить
+> шаг 5.
+
+### Убрать 30-секундное ожидание отпечатка при графическом входе
+
+Так как `pam_fprintd` стоит **первым** в `common-auth`, графический greeter (`fly-dm`)
+ждёт его таймаут перед приёмом введённого пароля. Уберите отпечаток только из greeter
+(сохранив его для консоли/`sudo`/`su`): замените `@include common-auth` в `/etc/pam.d/fly-dm`
+на встроенную копию `common-auth` **без** строки `pam_fprintd`. Номера переходов остаются
+верными: удаляемая строка была целью `default=2`/`success=1`, которые теперь ведут на
+`pam_unix`, а у того `success=2` по-прежнему ведёт на `pam_permit`. Сделайте бэкап
+(`sudo cp -a /etc/pam.d/fly-dm /etc/pam.d/fly-dm.orig`) и проверьте, что greeter сразу
+просит пароль без «приложите палец». **Не** редактируйте сам `common-auth` — это отключит
+отпечаток везде.
