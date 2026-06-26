@@ -10,3 +10,6 @@ ft9201/
 *.tmp
 *.bak
 *.orig-backup
+
+# Локальные инструкции Claude Code (не коммитим)
+CLAUDE.md
