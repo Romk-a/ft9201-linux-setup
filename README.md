@@ -330,16 +330,24 @@ fine) — only then does `pam_fprintd` arm and you can scan. Dead ends we hit (d
 ### Lock screen with fingerprint via xsecurelock + Matrix rain
 
 We bind `Win+L` to [xsecurelock](https://github.com/google/xsecurelock) instead, with a
-`cmatrix` saver and a background fingerprint watcher (touch the sensor → unlock; no Enter).
+`unimatrix` saver (Matrix rain with Japanese katakana) and a background fingerprint
+watcher (touch the sensor → unlock; no Enter).
 
-1. Build xsecurelock and install screensaver tools:
+1. Build xsecurelock and install screensaver tools. The rain is drawn by `unimatrix`
+   (a single Python script; katakana needs the `Noto Sans CJK JP` font):
    ```bash
-   sudo apt-get install -y autoconf automake pkg-config cmatrix xterm x11-utils \
+   sudo apt-get install -y autoconf automake pkg-config xterm x11-utils \
+     fonts-noto-mono fonts-noto-cjk \
      libpam0g-dev libx11-dev libxmu-dev libxcomposite-dev libxext-dev libxfixes-dev \
      libxrandr-dev libxss-dev libxft-dev
    git clone --depth 1 https://github.com/google/xsecurelock.git
    cd xsecurelock && sh autogen.sh && ./configure --with-pam-service-name=xsecurelock
    make && sudo make install      # -> /usr/local/bin/xsecurelock
+
+   # unimatrix (Matrix rain with katakana support) -> /usr/local/bin/unimatrix
+   sudo curl -sL -o /usr/local/bin/unimatrix \
+     https://raw.githubusercontent.com/will8211/unimatrix/master/unimatrix.py
+   sudo chmod 755 /usr/local/bin/unimatrix
    ```
 
 2. PAM service for xsecurelock — **password only** (fingerprint is handled by the watcher,
@@ -352,7 +360,8 @@ We bind `Win+L` to [xsecurelock](https://github.com/google/xsecurelock) instead,
    EOF
    ```
 
-3. `cmatrix` saver (draws into the xsecurelock saver window via an embedded xterm):
+3. Saver (draws into the xsecurelock saver window via an embedded xterm). Font is
+   `Noto Sans Mono` with a `Noto Sans CJK JP` fallback (Mono has no katakana):
    ```bash
    sudo tee /usr/local/libexec/xsecurelock/saver_cmatrix >/dev/null <<'EOF'
    #!/bin/sh
@@ -364,10 +373,15 @@ We bind `Win+L` to [xsecurelock](https://github.com/google/xsecurelock) instead,
    COLS=$(( W / 8 )); ROWS=$(( H / 16 ))
    [ "$COLS" -lt 20 ] && COLS=80; [ "$ROWS" -lt 10 ] && ROWS=24
    exec xterm -into "$WID" -geometry "${COLS}x${ROWS}+0+0" \
-     -fa "Monospace" -fs 14 -bg black -fg green -b 0 +sb -bc -e cmatrix -b -u 3
+     -fa "Noto Sans Mono,Noto Sans CJK JP" -fs 16 -bg black -fg green \
+     -b 0 +sb -bc -e unimatrix -l m -s 89 -i -o
    EOF
    sudo chmod 755 /usr/local/libexec/xsecurelock/saver_cmatrix
    ```
+   Tuning the rain — edit the last line (the file is re-read on every lock): `-s` is
+   speed (0–100, higher = faster; default 85); `-l m` is the character set (`m` =
+   katakana + digits + symbols, `k` = katakana only); `-fs` is the font size. Full
+   list: `unimatrix --help`.
 
 4. Wrapper that runs xsecurelock + a background `fprintd-verify` watcher; on a match it
    cleanly unlocks (`SIGTERM` makes xsecurelock kill its children and exit):

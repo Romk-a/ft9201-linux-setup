@@ -319,19 +319,27 @@ fprintd-enroll && fprintd-verify
 - `NoPassEnable` в `/etc/X11/fly-dm/fly-dmrc` — это «вход без пароля», не биометрия.
 - `kglobalaccel` не держит `Meta+L` (проверено) — клавишей владеет Fly WM.
 
-### Экран блокировки с отпечатком: xsecurelock + «дождь» cmatrix
+### Экран блокировки с отпечатком: xsecurelock + матричный «дождь» (unimatrix)
 
 Привязываем `Win+L` к [xsecurelock](https://github.com/google/xsecurelock) с сейвером
-`cmatrix` и фоновым сторожем отпечатка (касание сканера → разблокировка, без Enter).
+`unimatrix` (матричный «дождь» с японской катаканой) и фоновым сторожем отпечатка
+(касание сканера → разблокировка, без Enter).
 
-1. Сборка xsecurelock и инструменты сейвера:
+1. Сборка xsecurelock и инструменты сейвера. «Дождь» рисует `unimatrix` (один
+   Python-скрипт; для катаканы нужен шрифт `Noto Sans CJK JP`):
    ```bash
-   sudo apt-get install -y autoconf automake pkg-config cmatrix xterm x11-utils \
+   sudo apt-get install -y autoconf automake pkg-config xterm x11-utils \
+     fonts-noto-mono fonts-noto-cjk \
      libpam0g-dev libx11-dev libxmu-dev libxcomposite-dev libxext-dev libxfixes-dev \
      libxrandr-dev libxss-dev libxft-dev
    git clone --depth 1 https://github.com/google/xsecurelock.git
    cd xsecurelock && sh autogen.sh && ./configure --with-pam-service-name=xsecurelock
    make && sudo make install      # -> /usr/local/bin/xsecurelock
+
+   # unimatrix (матричный «дождь» с поддержкой katakana) -> /usr/local/bin/unimatrix
+   sudo curl -sL -o /usr/local/bin/unimatrix \
+     https://raw.githubusercontent.com/will8211/unimatrix/master/unimatrix.py
+   sudo chmod 755 /usr/local/bin/unimatrix
    ```
 
 2. PAM-сервис xsecurelock — **только пароль** (отпечаток обрабатывает сторож, в этом стеке
@@ -344,7 +352,8 @@ fprintd-enroll && fprintd-verify
    EOF
    ```
 
-3. Сейвер `cmatrix` (рисует в окне сейвера xsecurelock через встроенный xterm):
+3. Сейвер (рисует в окне сейвера xsecurelock через встроенный xterm). Шрифт —
+   `Noto Sans Mono` с фоллбэком на `Noto Sans CJK JP` (в Mono нет катаканы):
    ```bash
    sudo tee /usr/local/libexec/xsecurelock/saver_cmatrix >/dev/null <<'EOF'
    #!/bin/sh
@@ -356,10 +365,15 @@ fprintd-enroll && fprintd-verify
    COLS=$(( W / 8 )); ROWS=$(( H / 16 ))
    [ "$COLS" -lt 20 ] && COLS=80; [ "$ROWS" -lt 10 ] && ROWS=24
    exec xterm -into "$WID" -geometry "${COLS}x${ROWS}+0+0" \
-     -fa "Monospace" -fs 14 -bg black -fg green -b 0 +sb -bc -e cmatrix -b -u 3
+     -fa "Noto Sans Mono,Noto Sans CJK JP" -fs 16 -bg black -fg green \
+     -b 0 +sb -bc -e unimatrix -l m -s 89 -i -o
    EOF
    sudo chmod 755 /usr/local/libexec/xsecurelock/saver_cmatrix
    ```
+   Настройка «дождя» — правьте последнюю строку (файл перечитывается при каждой
+   блокировке): `-s` — скорость (0–100, больше = быстрее; дефолт 85); `-l m` — набор
+   символов (`m` = катакана + цифры + символы, `k` — только катакана); `-fs` — размер
+   шрифта. Полный список опций: `unimatrix --help`.
 
 4. Обёртка: запускает xsecurelock + фоновый сторож `fprintd-verify`; при совпадении чисто
    снимает блокировку (`SIGTERM` заставляет xsecurelock убить детей и выйти):
