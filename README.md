@@ -410,15 +410,21 @@ watcher (touch the sensor → unlock; no Enter).
    sudo chmod 755 /usr/local/bin/xsecurelock-fp
    ```
 
-5. Bind `Win+L` to it. In `~/.fly/keyshortcutrc` set `Mod4|l = "/usr/local/bin/xsecurelock-fp"`.
-   **Fly WM honours the *first* definition**, and the system file is included before yours,
-   so also comment the stock binding:
+5. Bind `Win+L` to it — in the **system** file `/usr/share/fly-wm/keyshortcutrc`. On this Fly
+   version `fly-wm` regenerates `~/.fly/keyshortcutrc` from the system file on restart, so a
+   binding written only to the user copy does **not** survive — it must live in the system file
+   (mirror it into the user copy too). Replace the stock `FLYWM_LOCK` line in both:
    ```bash
-   sudo sed -i 's/^Mod4|l = FLYWM_LOCK/;Mod4|l = FLYWM_LOCK  # -> xsecurelock-fp/' \
+   sudo sed -i 's#^Mod4|l = FLYWM_LOCK.*#Mod4|l = "/usr/local/bin/xsecurelock-fp"#' \
      /usr/share/fly-wm/keyshortcutrc
-   # Apply (a plain "force update" does NOT re-read the file — a full restart does):
-   DISPLAY=:0 XAUTHORITY="$HOME/.Xauthority" fly-wmfunc FLYWM_RESTART
+   sed -i 's#^Mod4|l = FLYWM_LOCK.*#Mod4|l = "/usr/local/bin/xsecurelock-fp"#' \
+     ~/.fly/keyshortcutrc
    ```
+   Use the spaced, quoted form exactly — the no-space form `Mod4|l="…"` is rejected and the file
+   gets renamed to `keyshortcutrc.bad`. No WM restart is needed: `fly-wm` picks the binding up
+   live (if it doesn't, log out and back in). Do **not** run `fly-wmfunc FLYWM_RESTART` from your
+   working terminal — it tears down the WM session (closing any terminal in it), and there is no
+   lightweight "reload shortcuts" command.
 
 Result: `Win+L` shows the Matrix rain; touch the sensor to unlock instantly, or press a
 key to type the password. No countdown, no failed-attempt penalty (the fingerprint is
@@ -426,7 +432,7 @@ outside the locker's PAM stack).
 
 > Note: the menu "Lock" item, idle auto-lock and lock-on-suspend still go through
 > `FLYWM_LOCK` → the stock locker (Enter-then-scan). After a `fly-wm` package upgrade the
-> commented system binding is restored — re-apply step 5.
+> stock `Mod4|l = FLYWM_LOCK` line is restored in the system file — re-apply step 5.
 
 ### Avoid the 30 s fingerprint wait at graphical login
 
